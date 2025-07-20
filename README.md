@@ -123,7 +123,9 @@ Answering your question...
 
 ### Special Commands
 
-- `/bye` or `/quit` or `/q`- Exit the shell assistant
+- `/run <command>` - Directly execute a shell command
+- `/ask <question>` - Directly ask a question  
+- `/bye` or `/quit` or `/q` - Exit the shell assistant
 - `/clear` - Clear conversation context and start fresh
 
 ## Configuration Options

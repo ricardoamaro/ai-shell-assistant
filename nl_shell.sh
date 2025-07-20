@@ -327,10 +327,24 @@ process_instruction() {
     return 0
   fi
 
-  # 2. Use LLM to classify intent
-  LLM_RESPONSE=$(get_llm_response "$LLM_MODEL" "You are an intent classifier for a shell assistant. Classify the user's input as 'COMMAND' (for shell operations), 'RETRIEVE' (for requests to fetch information from local files or the internet), 'ANALYZE' (for requests to analyze/examine/synthesize/evaluate already available data), or 'QUESTION' (for general inquiries). Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." "$NL_INSTRUCTION")
-  INTENT=$(echo "$LLM_RESPONSE" | head -n 1)
-  TOKENS_FOR_INTENT=$(echo "$LLM_RESPONSE" | tail -n 1)
+  # Check for direct commands and set variables to skip LLM classification
+  INTENT=""
+  COMMAND=""
+  TOKENS_FOR_INTENT=0
+  
+  if [[ "$NL_INSTRUCTION" =~ ^/run[[:space:]](.+) ]]; then
+    INTENT="COMMAND"
+    COMMAND="${BASH_REMATCH[1]}"
+  elif [[ "$NL_INSTRUCTION" =~ ^/ask[[:space:]](.+) ]]; then
+    INTENT="QUESTION"
+    NL_INSTRUCTION="${BASH_REMATCH[1]}" # Replace with just the question part
+  else
+    # 2. Use LLM to classify intent
+    LLM_RESPONSE=$(get_llm_response "$LLM_MODEL" "You are an intent classifier for a shell assistant. Classify the user's input as 'COMMAND' (for shell operations), 'RETRIEVE' (for requests to fetch information from local files or the internet), 'ANALYZE' (for requests to analyze/examine/synthesize/evaluate already available data), or 'QUESTION' (for general inquiries). Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." "$NL_INSTRUCTION")
+    INTENT=$(echo "$LLM_RESPONSE" | head -n 1)
+    TOKENS_FOR_INTENT=$(echo "$LLM_RESPONSE" | tail -n 1)
+  fi
+  
   TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + TOKENS_FOR_INTENT))
 
   echo "Mode: $INTENT" # Display the classified mode
@@ -352,37 +366,42 @@ process_instruction() {
 
   case "$INTENT" in
     "COMMAND")
-      # Prepare user content with context for command generation
-      USER_CONTENT_COMMAND="$NL_INSTRUCTION"
-      if [ -n "$LAST_CONTEXT" ]; then
-        USER_CONTENT_COMMAND="Previous interaction:\n$LAST_CONTEXT\n\nNew instruction: $NL_INSTRUCTION"
-      fi
-
-      # 3. Use LLM to convert instruction to command
-      LLM_RESPONSE=$(get_llm_response "$LLM_MODEL" "You are a helpful assistant that converts natural language to safe, single-line bash commands or several commands in the same line. Only reply with the commands with no markdown. Consider the previous interaction if provided." "$USER_CONTENT_COMMAND")
-      COMMAND=$(echo "$LLM_RESPONSE" | head -n -1)
-      TOKENS_FOR_COMMAND=$(echo "$LLM_RESPONSE" | tail -n 1)
-      TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + TOKENS_FOR_COMMAND))
-
-      COMMAND=${COMMAND#\`} # Remove leading backtick
-      COMMAND=${COMMAND%\`} # Remove trailing backtick
+      # Check if COMMAND is already set (from /run command)
       if [ -z "$COMMAND" ]; then
-        echo "Failed to generate command from LLM. Exiting."
-        return 1
+        # Prepare user content with context for command generation
+        USER_CONTENT_COMMAND="$NL_INSTRUCTION"
+        if [ -n "$LAST_CONTEXT" ]; then
+          USER_CONTENT_COMMAND="Previous interaction:\n$LAST_CONTEXT\n\nNew instruction: $NL_INSTRUCTION"
+        fi
+
+        # 3. Use LLM to convert instruction to command
+        LLM_RESPONSE=$(get_llm_response "$LLM_MODEL" "You are a helpful assistant that converts natural language to safe, single-line bash commands or several commands in the same line. Only reply with the commands with no markdown. Consider the previous interaction if provided." "$USER_CONTENT_COMMAND")
+        COMMAND=$(echo "$LLM_RESPONSE" | head -n -1)
+        TOKENS_FOR_COMMAND=$(echo "$LLM_RESPONSE" | tail -n 1)
+        TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + TOKENS_FOR_COMMAND))
+
+        COMMAND=${COMMAND#\`} # Remove leading backtick
+        COMMAND=${COMMAND%\`} # Remove trailing backtick
+        if [ -z "$COMMAND" ]; then
+          echo "Failed to generate command from LLM. Exiting."
+          return 1
+        fi
       fi
 
       echo "Running: $COMMAND"
       
-      # Skip confirmation if not running interactively
-      if [ -t 0 ]; then
+      # Skip confirmation for /run commands or non-interactive mode
+      if [ -z "$TOKENS_FOR_COMMAND" ] || [ ! -t 0 ]; then
+        # Direct /run command or non-interactive mode - no confirmation needed
+        echo "Auto-proceeding"
+      else
+        # Regular command mode - ask for confirmation
         echo -n "Proceed? (y/n): "
         read CONFIRMATION
         if [ "$CONFIRMATION" != "y" ]; then
           echo "Aborted."
           return 0
         fi
-      else
-        echo "Auto-proceeding (non-interactive mode)"
       fi
 
       # 4. Run the command
