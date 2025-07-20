@@ -182,6 +182,61 @@ shell-assistant/
 - Commands require user confirmation before execution
 - All interactions are logged locally for debugging
 
+## Testing
+
+The project includes comprehensive test suites to verify functionality across all supported models.
+
+### Test Scripts
+
+1. **Basic Functionality Tests** (`test_basic_functionality.sh`)
+   - Tests core features that don't require API calls
+   - Validates script structure and non-interactive mode
+   - Quick verification of basic functionality
+
+2. **Full Test Suite** (`test_nl_shell.sh`)
+   - Tests all intent classifications (COMMAND, RETRIEVE, ANALYZE, QUESTION)
+   - Validates direct commands and system controls
+   - Comprehensive functionality testing
+
+3. **All Models Test Runner** (`test_all_models.sh`)
+   - Runs both test suites against all supported models
+   - Provides summary results across all models
+
+### Running Tests
+
+#### Test a specific model:
+```bash
+# Basic functionality test
+./tests/test_basic_functionality.sh gemini
+./tests/test_basic_functionality.sh openai
+./tests/test_basic_functionality.sh ollama
+
+# Full test suite
+./tests/test_nl_shell.sh gemini
+./tests/test_nl_shell.sh openai
+./tests/test_nl_shell.sh ollama
+```
+
+#### Test all models at once:
+```bash
+# Run comprehensive tests across all models
+./tests/test_all_models.sh
+```
+
+#### Default model testing:
+```bash
+# If no model specified, defaults to gemini
+./tests/test_basic_functionality.sh
+./tests/test_nl_shell.sh
+```
+
+### Test Requirements
+
+- Properly configured `.env` file with API keys
+- For Ollama tests: Ollama server running locally
+- Internet connection for web search tests
+- Sufficient API quota for cloud models
+
 ## Troubleshooting
 
 ### Common Issues

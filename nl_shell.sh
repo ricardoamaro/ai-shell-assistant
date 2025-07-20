@@ -164,6 +164,31 @@ call_llm() {
     
     if [ -z "$parsed_content" ]; then
         echo "Error: LLM ($provider) response was empty or unparseable." >&2
+        if [ "$DEBUG_RAW_MESSAGES" = "true" ] || [ -z "$raw_response" ]; then
+            echo "Raw response was: '$raw_response'" >&2
+        fi
+        
+        # Check for common API errors
+        if echo "$raw_response" | grep -q "error"; then
+            local error_message
+            error_message=$(echo "$raw_response" | jq -r '.error.message // "Unknown API error"' 2>/dev/null)
+            [ -z "$error_message" ] && error_message="Unknown API error"
+            echo "API Error: $error_message" >&2
+        fi
+        
+        # Check for authentication issues
+        if echo "$raw_response" | grep -qi "unauthorized\|invalid.*key\|authentication"; then
+            echo "Authentication failed. Please check your API key configuration." >&2
+            case "$provider" in
+                "openai")
+                    echo "Verify OPENAI_API_KEY in your .env file." >&2
+                    ;;
+                "gemini")
+                    echo "Verify GEMINI_API_KEY in your .env file." >&2
+                    ;;
+            esac
+        fi
+        
         printf '0\n'
         return 1
     fi
@@ -244,7 +269,8 @@ handle_retrieve() {
                 return 1
             fi
             
-            retrieved_content=$(eval "$command_local_retrieval" 2>&1 | tee /dev/tty)
+            retrieved_content=$(eval "$command_local_retrieval" 2>&1)
+            echo "$retrieved_content"
             ;;
             
         *)
@@ -284,12 +310,22 @@ validate_api_config() {
                 echo "Please set it in your .env file."
                 exit 1
             fi
+            # Test if API key looks valid (basic format check)
+            if [[ ! "$OPENAI_API_KEY" =~ ^sk-[a-zA-Z0-9_-]{20,}$ ]]; then
+                echo "Warning: OPENAI_API_KEY format appears invalid."
+                echo "OpenAI API keys should start with 'sk-' followed by alphanumeric characters."
+            fi
             ;;
         "gemini")
             if [ -z "$GEMINI_API_KEY" ]; then
                 echo "Error: GEMINI_API_KEY is required when using Gemini models."
                 echo "Please set it in your .env file."
                 exit 1
+            fi
+            # Test if API key looks valid (basic format check)
+            if [[ ! "$GEMINI_API_KEY" =~ ^[a-zA-Z0-9_-]{20,}$ ]]; then
+                echo "Warning: GEMINI_API_KEY format appears invalid."
+                echo "Gemini API keys should be alphanumeric strings of 20+ characters."
             fi
             ;;
         "ollama")
@@ -323,7 +359,8 @@ execute_command() {
     fi
     
     echo "Output:"
-    command_output=$(eval "$command" 2>&1 | tee /dev/tty)
+    command_output=$(eval "$command" 2>&1)
+    echo "$command_output"
     command_exit_status=$?
     
     # Update context
