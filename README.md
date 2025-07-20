@@ -128,22 +128,84 @@ Answering your question...
 - `/bye` or `/quit` or `/q` - Exit the shell assistant
 - `/clear` - Clear conversation context and start fresh
 
-### Safe Commands
+### Security and Safety Features
 
-The shell assistant includes a safety feature that automatically executes certain "safe" read-only commands without requiring user confirmation. This improves the user experience for common, non-destructive operations.
+The shell assistant includes comprehensive security measures to protect against command injection and information disclosure while maintaining usability for safe operations.
 
-#### Default Safe Commands:
-`date`, `pwd`, `whoami`, `uname`, `ls`, `cat`, `head`, `tail`, `grep`, `wc`, `echo`, `which`, `id`, `uptime`, `df`, `free`, `ps`
+#### Multi-Layer Security Architecture
 
-#### Custom Safe Commands:
+1. **Command Classification**: Commands are automatically classified as safe or potentially dangerous
+2. **Pattern Detection**: Warns about access to sensitive files and system locations
+3. **Injection Detection**: Detects special characters and command injection patterns
+4. **Resource Protection**: Implements timeouts to prevent resource exhaustion
+
+#### Safe Commands System
+
+The system automatically executes certain "safe" read-only commands without requiring user confirmation:
+
+**Safe Commands**:
+- `date`, `pwd`, `whoami`, `id`, `uptime`, `which`, `uname`
+- `ls`: Directory listings
+- `cat`, `head`, `tail`, `less`, `more`: File viewing
+- `wc`: Word count
+- `grep`: Text search (including recursive with -r)
+- `df`, `free`: System information  
+- `ps`: Process listing
+- `echo`: Text output
+
+#### Security Protections
+
+**Dangerous Pattern Detection**:
+Commands containing sensitive paths or credential-related terms will prompt for user confirmation:
+- System directories: `/etc/shadow`, `/etc/passwd`, `/root`, `/.ssh/`, `/var/log/`
+- Device files: `/dev/zero`, `/dev/random`, `/dev/urandom`
+- User sensitive paths: `~/.ssh`, `~/.aws`, `~/.config`
+- System paths: `/proc/sys`, `/sys/`
+- Credential-related terms: "credentials", "password", "secret", "key", "token", "private"
+- Certificate files: `.pem`, `.key`, `.crt`, `.p12`
+
+**Special Character Detection**:
+Commands with special characters that might indicate command injection will prompt for confirmation:
+- Special characters: `$`, `` ` ``, `;`, `|`, `&`, `(`, `)`, `<`, `>`, `{`, `}`
+
+#### Custom Safe Commands
+
 You can add your own safe commands by setting the `SAFE_COMMANDS` environment variable in your `.env` file:
 
 ```bash
 # Add custom safe commands (comma-separated)
-SAFE_COMMANDS=hostname,history,find,sort,uniq,awk,sed
+SAFE_COMMANDS=hostname,history,tree,file
 ```
 
-**Note**: Only add commands you're confident are safe and non-destructive. The system will automatically execute these without asking for confirmation.
+**Security Note**: Custom safe commands still undergo all security checks. Only add commands you're confident are safe and won't expose sensitive information.
+
+#### Advanced Security Configuration
+
+Configure additional security settings in your `.env` file:
+
+```bash
+# Enable strict mode for enhanced security warnings
+SAFE_MODE_STRICT=true
+
+# Maximum command length (prevents injection attacks)
+MAX_COMMAND_LENGTH=500
+
+# Output limits (prevents resource exhaustion) - REMOVED for better UX
+# MAX_OUTPUT_LINES=100
+# MAX_OUTPUT_CHARS=10000
+
+# Command execution timeout in seconds
+COMMAND_TIMEOUT=60
+```
+
+#### Security Best Practices
+
+1. **Review Commands**: Always review suggested commands before execution
+2. **Limited Permissions**: Run the assistant with limited user permissions
+3. **Network Isolation**: Consider network restrictions for enhanced security
+4. **Log Monitoring**: Regularly review log files for suspicious activity
+5. **API Key Security**: Keep API keys secure and rotate them regularly
+6. **Environment Isolation**: Use in isolated environments for testing dangerous operations
 
 ## Configuration Options
 
@@ -155,8 +217,8 @@ SAFE_COMMANDS=hostname,history,find,sort,uniq,awk,sed
 | `GEMINI_API_KEY` | Google Gemini API key | Required for Gemini |
 | `OLLAMA_HOST` | Ollama server URL | `http://localhost:11434` |
 | `DEFAULT_LLM_MODEL` | Default LLM provider | `gemini` |
-| `OPENAI_MODEL` | OpenAI model to use | `gpt-4.1-mini` |
-| `GEMINI_MODEL` | Gemini model to use | `gemini-2.5-flash-preview-05-20` |
+| `OPENAI_MODEL` | OpenAI model to use | `gpt-4o-mini` |
+| `GEMINI_MODEL` | Gemini model to use | `gemini-2.5-flash` |
 | `OLLAMA_MODEL` | Ollama model to use | `llama3.1` |
 | `LLM_TEMPERATURE` | Response creativity (0.0-1.0) | `0.7` |
 | `WEB_SEARCH_ENGINE_FUNCTION` | Search engine | `brave_search_function` |
@@ -164,6 +226,9 @@ SAFE_COMMANDS=hostname,history,find,sort,uniq,awk,sed
 | `LOGS_DIR` | Log files directory | `logs` |
 | `MAX_LAST_CONTEXT_WORDS` | Context window size | `512` |
 | `SAFE_COMMANDS` | Additional safe commands (comma-separated) | `""` |
+| `SAFE_MODE_STRICT` | Enable enhanced security warnings | `true` |
+| `MAX_COMMAND_LENGTH` | Maximum allowed command length | `500` |
+| `COMMAND_TIMEOUT` | Command execution timeout (seconds) | `60` |
 
 ### Recommended Models
 
@@ -175,7 +240,7 @@ SAFE_COMMANDS=hostname,history,find,sort,uniq,awk,sed
 
 #### Cloud APIs
 - **OpenAI**: `gpt-4o-mini`, `gpt-4o`, `gpt-3.5-turbo`
-- **Gemini**: `gemini-2.5-flash-preview-05-20`, `gemini-1.5-pro`
+- **Gemini**: `gemini-2.5-flash`, `gemini-1.5-pro`
 
 ## File Structure
 

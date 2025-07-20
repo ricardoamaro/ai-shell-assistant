@@ -31,14 +31,17 @@ readonly CONTENT_SEPARATOR="---END_CONTENT---"
 WEB_SEARCH_ENGINE_FUNCTION="${WEB_SEARCH_ENGINE_FUNCTION:-brave_search_function}"
 DEBUG_RAW_MESSAGES="${DEBUG_RAW_MESSAGES:-false}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
-OPENAI_MODEL="${OPENAI_MODEL:-gpt-4.1-mini}"
-GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash-preview-05-20}"
+OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o-mini}"
+GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.1}"
 LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.7}"
 LOGS_DIR="${LOGS_DIR:-logs}"
 MAX_LAST_CONTEXT_WORDS="${MAX_LAST_CONTEXT_WORDS:-512}"
 TOTAL_TOKENS_USED="${TOTAL_TOKENS_USED:-0}"
 SAFE_COMMANDS="${SAFE_COMMANDS:-}"
+SAFE_MODE_STRICT="${SAFE_MODE_STRICT:-false}"
+MAX_COMMAND_LENGTH="${MAX_COMMAND_LENGTH:-200}"
+COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-60}"
 
 # Default LLM model from command line argument or environment variable
 LLM_MODEL="${1:-${DEFAULT_LLM_MODEL:-gemini}}"
@@ -113,6 +116,13 @@ call_llm() {
             
             parsed_content=$(echo "$raw_response" | jq -r '.choices[0].message.content // empty')
             total_tokens=$(echo "$raw_response" | jq -r '.usage.total_tokens // 0')
+            
+            # Check for specific OpenAI API errors
+            if [ -z "$parsed_content" ] && echo "$raw_response" | grep -q "exceeded your current quota"; then
+                echo "API quota exceeded for OpenAI. Please check your billing details." >&2
+                printf 'API_QUOTA_EXCEEDED\n0\n'
+                return 1
+            fi
             ;;
             
         "gemini")
@@ -133,6 +143,13 @@ call_llm() {
             
             parsed_content=$(echo "$raw_response" | jq -r '.candidates[0].content.parts[0].text // empty')
             total_tokens=$(echo "$raw_response" | jq -r '.usageMetadata.totalTokenCount // 0')
+            
+            # Check for specific Gemini API errors
+            if [ -z "$parsed_content" ] && echo "$raw_response" | grep -q "exceeded your current quota"; then
+                echo "API quota exceeded for Gemini. Please check your billing details." >&2
+                printf 'API_QUOTA_EXCEEDED\n0\n'
+                return 1
+            fi
             ;;
             
         "ollama")
@@ -341,54 +358,102 @@ validate_api_config() {
 # Function to check if a command is safe (doesn't require confirmation)
 is_safe_command() {
     local command="$1"
-    # Default safe commands (read-only operations)
-    local default_safe_commands=(
+    local base_command full_args
+    
+    # Extract base command and full arguments
+    base_command=$(echo "$command" | awk '{print $1}')
+    full_args="$command"
+    
+    # Security check: Command length limit
+    if [ ${#full_args} -gt ${MAX_COMMAND_LENGTH} ]; then
+        return 1  # Command too long, potentially dangerous
+    fi
+    
+    # Security check: Dangerous patterns and paths (these should prompt user, not auto-block)
+    local dangerous_patterns=(
+        "/etc/shadow"
+        "/etc/passwd"
+        "/root"
+        "/.ssh/"
+        "/var/log/"
+        "/dev/zero"
+        "/dev/random"
+        "/dev/urandom"
+        "~/.ssh"
+        "~/.aws"
+        "~/.config"
+        "/proc/sys"
+        "/sys/"
+        "credentials"
+        "password"
+        "secret"
+        "key"
+        "token"
+        "private"
+        ".pem"
+        ".key"
+        ".crt"
+        ".p12"
+    )
+    
+    # Check for dangerous patterns in the full command (case-insensitive)
+    # Instead of blocking, we'll let these go to user confirmation
+    for pattern in "${dangerous_patterns[@]}"; do
+        if [[ "${full_args,,}" == *"${pattern,,}"* ]]; then
+            return 1  # Contains dangerous pattern - will prompt user
+        fi
+    done
+    
+    # Check for special characters that might indicate injection
+    # Instead of auto-blocking, let user decide
+    if [[ "$full_args" =~ [\$\`\;\|\&\(\)\<\>\{\}] ]]; then
+        return 1  # Contains potential injection characters - will prompt user
+    fi
+    
+    # Safe commands (no restrictions)
+    local safe_commands=(
         "date"
         "pwd"
         "whoami"
+        "id"
+        "uptime"
+        "which"
         "uname"
         "ls"
         "cat"
         "head"
         "tail"
+        "less"
+        "more"
         "grep"
         "wc"
         "echo"
-        "which"
-        "id"
-        "uptime"
         "df"
         "free"
         "ps"
     )
     
-    # Combine default safe commands with user-defined ones from .env
-    local all_safe_commands=("${default_safe_commands[@]}")
+    # Check safe commands first
+    for safe_cmd in "${safe_commands[@]}"; do
+        if [[ "$base_command" == "$safe_cmd" ]]; then
+            return 0  # Safe
+        fi
+    done
     
-    # Add user-defined safe commands from .env if they exist
+    # Check user-defined safe commands
     if [ -n "$SAFE_COMMANDS" ]; then
         # Convert comma-separated string to array
         IFS=',' read -ra user_safe_commands <<< "$SAFE_COMMANDS"
         for cmd in "${user_safe_commands[@]}"; do
-            # Trim whitespace and add to array
+            # Trim whitespace
             cmd=$(echo "$cmd" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            if [ -n "$cmd" ]; then
-                all_safe_commands+=("$cmd")
+            if [ -n "$cmd" ] && [[ "$base_command" == "$cmd" ]]; then
+                return 0
             fi
         done
     fi
     
-    # Extract the base command (first word)
-    local base_command=$(echo "$command" | awk '{print $1}')
-    
-    # Check if the base command is in the safe list
-    for safe_cmd in "${all_safe_commands[@]}"; do
-        if [[ "$base_command" == "$safe_cmd" ]]; then
-            return 0  # Safe command found
-        fi
-    done
-    
-    return 1  # Not a safe command
+    return 1  # Not safe by default
 }
 
 # Function to handle command execution
@@ -400,10 +465,25 @@ execute_command() {
     
     echo "Running: $command"
     
+    # Enhanced security check for safe commands
+    local is_safe_cmd=false
+    if is_safe_command "$command"; then
+        is_safe_cmd=true
+    fi
+    
     # Skip confirmation for /run commands, non-interactive mode, or safe commands
-    if [ "$skip_confirmation" = "true" ] || [ ! -t 0 ] || is_safe_command "$command"; then
-        echo "Auto-proceeding"
+    if [ "$skip_confirmation" = "true" ] || [ ! -t 0 ] || [ "$is_safe_cmd" = "true" ]; then
+        if [ "$is_safe_cmd" = "true" ]; then
+            echo "Auto-proceeding (safe command)"
+        else
+            echo "Auto-proceeding"
+        fi
     else
+        # For potentially unsafe commands, show more context
+        if [ "$SAFE_MODE_STRICT" = "true" ]; then
+            echo "WARNING: This command may modify your system or access sensitive data."
+            echo "Command: $command"
+        fi
         echo -n "Proceed? (y/n): "
         read CONFIRMATION
         if [ "$CONFIRMATION" != "y" ]; then
@@ -413,11 +493,29 @@ execute_command() {
     fi
     
     echo "Output:"
-    command_output=$(eval "$command" 2>&1)
-    echo "$command_output"
-    command_exit_status=$?
     
-    # Update context
+    # Execute command with timeout if configured, preserving colors and formatting
+    if [ -n "$COMMAND_TIMEOUT" ] && [ "$COMMAND_TIMEOUT" -gt 0 ]; then
+        timeout "${COMMAND_TIMEOUT}s" bash -c "$command"
+        command_exit_status=$?
+        
+        # Capture output for context (without colors for LLM processing)
+        command_output=$(timeout "${COMMAND_TIMEOUT}s" bash -c "$command" 2>&1)
+        
+        # Check if command was killed by timeout
+        if [ $command_exit_status -eq 124 ]; then
+            echo "[COMMAND TIMEOUT: Execution exceeded ${COMMAND_TIMEOUT} seconds]"
+            command_output="$command_output\n[COMMAND TIMEOUT: Execution exceeded ${COMMAND_TIMEOUT} seconds]"
+        fi
+    else
+        eval "$command"
+        command_exit_status=$?
+        
+        # Capture output for context
+        command_output=$(eval "$command" 2>&1)
+    fi
+    
+    # Update context with original output
     update_context "Instruction: '$nl_instruction'${nl_instruction:+$'\n'}Command: '$command'${command:+$'\n'}Output: '$command_output'"
     
     # Analyze output only if command failed
@@ -446,7 +544,7 @@ analyze_command_failure() {
     
     if [ -n "$analysis" ]; then
         echo "Analysis:"
-        echo "$analysis"
+        printf "%s\n" "$analysis"
     else
         echo "Failed to get analysis from LLM."
     fi
@@ -485,7 +583,7 @@ handle_question_or_analysis() {
     
     if [ -n "$answer" ]; then
         echo "$response_label:"
-        echo "$answer"
+        printf "%s\n" "$answer"
     else
         echo "Failed to get $response_label from LLM."
     fi
@@ -532,16 +630,17 @@ process_instruction() {
         local intent_response parsed_intent_response
         intent_response=$(get_llm_response "$LLM_MODEL" \
             "You are an intent classifier for a shell assistant. Classify the user's input as:
-- 'COMMAND': Shell operations, system information requests (date, time, disk space, processes, file operations), or anything requiring command execution to get the answer
+- 'COMMAND': Shell operations, system information requests that require executing commands to get current/live data (date, time, disk space, processes, file operations)
 - 'RETRIEVE': Requests to fetch information from local files or the internet (e.g., web search, file content retrieval)  
-- 'ANALYZE': Requests to analyze/examine/synthesize/evaluate already available data or context
+- 'ANALYZE': Requests to analyze/examine/synthesize/evaluate/summarize data that is already available or will be retrieved. Keywords: 'analyze', 'examine', 'review', 'summarize', 'evaluate'
 - 'QUESTION': General knowledge questions that can be answered without system access or command execution
 
 Examples:
-- 'what is the current date or time?' → COMMAND (needs 'date' command)
-- 'list files' → COMMAND (needs 'ls' command)  
-- 'what is Python?' → QUESTION (general knowledge usually answered by LLM)
-- 'search for news about AI, the weather, up-to-date informations, etc.' → RETRIEVE (needs web search)
+- 'what is the current date or time?' → COMMAND (needs 'date' command for current info)
+- 'list files' → COMMAND (needs 'ls' command)
+- 'analyze the current directory structure' → ANALYZE (analyzing/examining data)
+- 'what is Python?' → QUESTION (general knowledge)
+- 'search for news about AI' → RETRIEVE (needs web search)
 
 Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
             "$nl_instruction")
@@ -558,6 +657,10 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
     case "$intent" in
         "COMMAND"|"RETRIEVE"|"ANALYZE"|"QUESTION")
             FAILED_CLASSIFICATION_COUNT=0  # Reset on success
+            ;;
+        "API_QUOTA_EXCEEDED")
+            echo "API quota exceeded. Cannot continue processing requests." >&2
+            return 1
             ;;
         *)
             FAILED_CLASSIFICATION_COUNT=$((FAILED_CLASSIFICATION_COUNT + 1))
@@ -658,10 +761,10 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
                 
                 if [ -n "$analysis_summary" ]; then
                     echo "Summary:"
-                    echo "$analysis_summary"
+                    printf "%s\n" "$analysis_summary"
                 else
                     echo "Failed to analyze retrieved content. Showing raw data:"
-                    echo "$retrieved_content"
+                    printf "%s\n" "$retrieved_content"
                 fi
                 
                 update_context "Request: '$nl_instruction'${nl_instruction:+$'\n'}Retrieved Content: '$retrieved_content'${retrieved_content:+$'\n'}Summary: '$analysis_summary'"
