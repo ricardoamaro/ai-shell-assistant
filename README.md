@@ -128,6 +128,23 @@ Answering your question...
 - `/bye` or `/quit` or `/q` - Exit the shell assistant
 - `/clear` - Clear conversation context and start fresh
 
+### Safe Commands
+
+The shell assistant includes a safety feature that automatically executes certain "safe" read-only commands without requiring user confirmation. This improves the user experience for common, non-destructive operations.
+
+#### Default Safe Commands:
+`date`, `pwd`, `whoami`, `uname`, `ls`, `cat`, `head`, `tail`, `grep`, `wc`, `echo`, `which`, `id`, `uptime`, `df`, `free`, `ps`
+
+#### Custom Safe Commands:
+You can add your own safe commands by setting the `SAFE_COMMANDS` environment variable in your `.env` file:
+
+```bash
+# Add custom safe commands (comma-separated)
+SAFE_COMMANDS=hostname,history,find,sort,uniq,awk,sed
+```
+
+**Note**: Only add commands you're confident are safe and non-destructive. The system will automatically execute these without asking for confirmation.
+
 ## Configuration Options
 
 ### Environment Variables
@@ -146,6 +163,7 @@ Answering your question...
 | `DEBUG_RAW_MESSAGES` | Show raw LLM responses | `false` |
 | `LOGS_DIR` | Log files directory | `logs` |
 | `MAX_LAST_CONTEXT_WORDS` | Context window size | `512` |
+| `SAFE_COMMANDS` | Additional safe commands (comma-separated) | `""` |
 
 ### Recommended Models
 

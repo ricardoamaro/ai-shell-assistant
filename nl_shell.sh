@@ -38,6 +38,7 @@ LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.7}"
 LOGS_DIR="${LOGS_DIR:-logs}"
 MAX_LAST_CONTEXT_WORDS="${MAX_LAST_CONTEXT_WORDS:-512}"
 TOTAL_TOKENS_USED="${TOTAL_TOKENS_USED:-0}"
+SAFE_COMMANDS="${SAFE_COMMANDS:-}"
 
 # Default LLM model from command line argument or environment variable
 LLM_MODEL="${1:-${DEFAULT_LLM_MODEL:-gemini}}"
@@ -337,6 +338,59 @@ validate_api_config() {
     esac
 }
 
+# Function to check if a command is safe (doesn't require confirmation)
+is_safe_command() {
+    local command="$1"
+    # Default safe commands (read-only operations)
+    local default_safe_commands=(
+        "date"
+        "pwd"
+        "whoami"
+        "uname"
+        "ls"
+        "cat"
+        "head"
+        "tail"
+        "grep"
+        "wc"
+        "echo"
+        "which"
+        "id"
+        "uptime"
+        "df"
+        "free"
+        "ps"
+    )
+    
+    # Combine default safe commands with user-defined ones from .env
+    local all_safe_commands=("${default_safe_commands[@]}")
+    
+    # Add user-defined safe commands from .env if they exist
+    if [ -n "$SAFE_COMMANDS" ]; then
+        # Convert comma-separated string to array
+        IFS=',' read -ra user_safe_commands <<< "$SAFE_COMMANDS"
+        for cmd in "${user_safe_commands[@]}"; do
+            # Trim whitespace and add to array
+            cmd=$(echo "$cmd" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [ -n "$cmd" ]; then
+                all_safe_commands+=("$cmd")
+            fi
+        done
+    fi
+    
+    # Extract the base command (first word)
+    local base_command=$(echo "$command" | awk '{print $1}')
+    
+    # Check if the base command is in the safe list
+    for safe_cmd in "${all_safe_commands[@]}"; do
+        if [[ "$base_command" == "$safe_cmd" ]]; then
+            return 0  # Safe command found
+        fi
+    done
+    
+    return 1  # Not a safe command
+}
+
 # Function to handle command execution
 execute_command() {
     local command="$1"
@@ -346,8 +400,8 @@ execute_command() {
     
     echo "Running: $command"
     
-    # Skip confirmation for /run commands or non-interactive mode
-    if [ "$skip_confirmation" = "true" ] || [ ! -t 0 ]; then
+    # Skip confirmation for /run commands, non-interactive mode, or safe commands
+    if [ "$skip_confirmation" = "true" ] || [ ! -t 0 ] || is_safe_command "$command"; then
         echo "Auto-proceeding"
     else
         echo -n "Proceed? (y/n): "
