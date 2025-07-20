@@ -101,7 +101,7 @@ run_test() {
     fi
     
     echo -e "${YELLOW}Output:${NC}"
-    echo "$output" | head -10  # Show first 10 lines of output
+    echo "$output" | head -20  # Show first 20 lines of output
     echo "---"
     echo
 }
@@ -154,7 +154,7 @@ test_direct_command() {
     fi
     
     echo -e "${YELLOW}Output:${NC}"
-    echo "$output" | head -8
+    echo "$output" | head -20
     echo "---"
     echo
 }
@@ -187,7 +187,7 @@ test_system_command() {
     fi
     
     echo -e "${YELLOW}Output:${NC}"
-    echo "$output" | head -5
+    echo "$output" | head -20
     echo "---"
     echo
 }
@@ -230,19 +230,32 @@ echo
 echo -e "${BLUE}=== 2. COMMAND Intent Tests ===${NC}"
 run_test "what is the current date?" "COMMAND" "Date command classification"
 run_test "show disk usage in current directory" "COMMAND" "Filesystem command classification"
+run_test "check system memory usage" "COMMAND" "Memory status classification"
+run_test "find all log files in this subtree modified today" "COMMAND" "File search classification"
 
 echo -e "${BLUE}=== 3. QUESTION Intent Tests ===${NC}"
 run_test "what is Python?" "QUESTION" "General knowledge question"
 run_test "explain file permissions in Linux" "QUESTION" "Technical concept question"
+run_test "what are the benefits of containerization?" "QUESTION" "Technology concept question"
+run_test "how does HTTP work?" "QUESTION" "Protocol explanation question"
+run_test "what is the difference between TCP and UDP?" "QUESTION" "Comparison question"
 
 echo -e "${BLUE}=== 4. RETRIEVE Intent Tests ===${NC}"
 run_test "search for latest news about AI" "RETRIEVE" "Web search classification"
 run_test "find information about bash scripting best practices" "RETRIEVE" "Information retrieval classification"
+run_test "look up documentation for Docker installation" "RETRIEVE" "Documentation lookup classification"
+run_test "search for recent updates on Linux kernel" "RETRIEVE" "Technical news search classification"
+run_test "search for Python package management tutorials online" "RETRIEVE" "Technical information retrieval"
 
 echo -e "${BLUE}=== 5. ANALYZE Intent Tests ===${NC}"
 # Note: ANALYZE tests require context, so we'll test with a simple case
 run_test "analyze the current directory structure" "ANALYZE" "Analysis classification"
 run_test "analyze disk usage in current directory" "ANALYZE" "Filesystem analysis classification"
+run_test "analyze the performance of my server" "ANALYZE" "Performance analysis classification"
+run_test "explain the output of this command" "ANALYZE" "Command output analysis"
+run_test "analyze system logs for errors" "ANALYZE" "Log analysis classification"
+run_test "review this code for potential issues" "ANALYZE" "Code review analysis"
+run_test "examine network traffic patterns" "ANALYZE" "Network analysis classification"
 
 echo -e "${BLUE}=== 6. Direct Command Tests ===${NC}"
 test_direct_command "/run echo 'test message'" "Direct run command"
@@ -265,7 +278,7 @@ else
 fi
 
 echo -e "${YELLOW}Output:${NC}"
-echo "$output" | head -8
+echo "$output" | head -20
 echo "---"
 echo
 
