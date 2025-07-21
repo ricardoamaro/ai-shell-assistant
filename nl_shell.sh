@@ -77,7 +77,7 @@ parse_llm_response() {
     
     # Check if response has multiple lines
     if [[ "$response" == *$'\n'* ]]; then
-        # Multi-line response: content is all lines except the last, tokens is the last line
+        # Multi-line response: content is all lines except the last, tokens is
         content=$(echo "$response" | head -n -1)
         tokens=$(echo "$response" | tail -n 1)
     else
@@ -227,6 +227,34 @@ get_llm_response() {
     call_llm "$provider" "$system_message" "$user_content"
 }
 
+# Wrapper function for LLM calls with automatic token tracking
+call_llm_and_update_tokens() {
+    local system_message="$1"
+    local user_content="$2"
+    local response parsed_response content tokens
+    
+    response=$(get_llm_response "$LLM_MODEL" "$system_message" "$user_content")
+    parsed_response=$(parse_llm_response "$response")
+    content=$(echo "$parsed_response" | head -n -1)  # Get all lines except the last (tokens)
+    tokens=$(echo "$parsed_response" | tail -n 1)     # Get the last line (tokens)
+    TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + tokens))
+    
+    printf '%s\n%s\n' "$content" "$tokens"
+}
+
+# Function to build context with previous interaction
+build_context_with_previous() {
+    local instruction="$1"
+    local context="$2"
+    local prefix="${3:-New instruction}"
+    
+    if [ -n "$context" ]; then
+        printf "Previous interaction:\n%s\n\n%s: %s" "$context" "$prefix" "$instruction"
+    else
+        printf "%s" "$instruction"
+    fi
+}
+
 # Function to handle data retrieval (local or web)
 handle_retrieve() {
     local nl_instruction="$1"
@@ -236,19 +264,15 @@ handle_retrieve() {
     local user_content_decision retrieval_response retrieval_type
     
     # Decide between WEB_RETRIEVAL and LOCAL_RETRIEVAL
-    user_content_decision="$nl_instruction"
-    if [ -n "$last_context" ]; then
-        user_content_decision="Previous interaction:${last_context:+$'\n'}$last_context${last_context:+$'\n\n'}New instruction: $nl_instruction"
-    fi
+    user_content_decision=$(build_context_with_previous "$nl_instruction" "$last_context")
     
-    retrieval_response=$(get_llm_response "$LLM_MODEL" \
+    local retrieval_result
+    retrieval_result=$(call_llm_and_update_tokens \
         "You are a helpful assistant that determines the best way to retrieve data for analysis. Given the user's request, decide if the information needs to be retrieved from from the local shell functions, binaries, filesystem or data ('LOCAL_RETRIEVAL'), or from the internet ('WEB_RETRIEVAL') if not available locally. Reply with only 'WEB_RETRIEVAL' or 'LOCAL_RETRIEVAL'. Consider the previous interaction if provided." \
         "$user_content_decision")
     
-    local parsed_response
-    parsed_response=$(parse_llm_response "$retrieval_response")
-    retrieval_type=$(echo "$parsed_response" | sed -n '1p')
-    tokens_used_in_retrieval=$(echo "$parsed_response" | sed -n '2p')
+    retrieval_type=$(echo "$retrieval_result" | head -n 1)  # First line only (should be single word)
+    tokens_used_in_retrieval=$(echo "$retrieval_result" | sed -n '2p')
     
     case "$retrieval_type" in
         "WEB_RETRIEVAL")
@@ -258,7 +282,7 @@ handle_retrieve() {
                 retrieved_content=$("$WEB_RETRIEVAL_ENGINE_FUNCTION" "$nl_instruction" | jq -r '.message // empty')
             else
                 echo "Error: Invalid WEB_RETRIEVAL_ENGINE_FUNCTION specified: $WEB_RETRIEVAL_ENGINE_FUNCTION" >&2
-                printf '\n%s\n%s\n' "$CONTENT_SEPARATOR" "$tokens_used_in_retrieval"
+                printf '\n%s\n%s|%s\n' "$CONTENT_SEPARATOR" "$retrieval_type" "$tokens_used_in_retrieval"
                 return 1
             fi
             ;;
@@ -266,19 +290,15 @@ handle_retrieve() {
         "LOCAL_RETRIEVAL")
             local user_content_local_retrieval command_response command_local_retrieval command_tokens
             
-            user_content_local_retrieval="$nl_instruction"
-            if [ -n "$last_context" ]; then
-                user_content_local_retrieval="Previous interaction:${last_context:+$'\n'}$last_context${last_context:+$'\n\n'}New instruction (for local data retrieval): $nl_instruction"
-            fi
+            user_content_local_retrieval=$(build_context_with_previous "$nl_instruction" "$last_context" "New instruction (for local data retrieval)")
             
-            command_response=$(get_llm_response "$LLM_MODEL" \
+            local command_result
+            command_result=$(call_llm_and_update_tokens \
                 "Respond in $LLM_LANGUAGE. You are a helpful assistant that converts natural language requests for data retrieval into safe, single-line bash commands to retrieve that data from local files or system. Only reply with the command with no markdown. For example, if asked to 'read test.txt', you might reply 'cat test.txt'. Consider the previous interaction if provided." \
                 "$user_content_local_retrieval")
             
-            local parsed_command_response
-            parsed_command_response=$(parse_llm_response "$command_response")
-            command_local_retrieval=$(echo "$parsed_command_response" | sed -n '1p')
-            command_tokens=$(echo "$parsed_command_response" | sed -n '2p')
+            command_local_retrieval=$(echo "$command_result" | head -n 1)  # First line only (should be single command)
+            command_tokens=$(echo "$command_result" | sed -n '2p')
             tokens_used_in_retrieval=$((tokens_used_in_retrieval + command_tokens))
             
             # Clean command of backticks
@@ -287,7 +307,7 @@ handle_retrieve() {
             
             if [ -z "$command_local_retrieval" ]; then
                 echo "Failed to generate local data retrieval command." >&2
-                printf '\n%s\n%s\n' "$CONTENT_SEPARATOR" "$tokens_used_in_retrieval"
+                printf '\n%s\n%s|%s\n' "$CONTENT_SEPARATOR" "$retrieval_type" "$tokens_used_in_retrieval"
                 return 1
             fi
             
@@ -295,40 +315,10 @@ handle_retrieve() {
             # This will apply safety checks and proper confirmation handling
             echo "Running: $command_local_retrieval" >&2
             
-            # Enhanced security check for safe commands
-            local is_safe_cmd=false
-            if is_safe_command "$command_local_retrieval"; then
-                is_safe_cmd=true
-            fi
-            
-            # Skip confirmation for non-interactive mode, or safe commands
-            if [ ! -t 0 ] || [ "$is_safe_cmd" = "true" ]; then
-                if [ "$is_safe_cmd" = "true" ]; then
-                    echo "Auto-proceeding (safe command)" >&2
-                else
-                    # For unsafe commands in non-interactive mode, show warning with countdown
-                    echo "WARNING: This command may modify your system or access sensitive data." >&2
-                    echo "Command: $command_local_retrieval" >&2
-                    echo "Auto-proceeding in 10 seconds. Press Ctrl+C now to cancel" >&2
-                    for i in {10..1}; do
-                        echo -n "$i..." >&2
-                        sleep 1
-                    done
-                    echo " proceeding" >&2
-                fi
-            else
-                # For potentially unsafe commands, show more context
-                if [ "$SAFE_MODE_STRICT" = "true" ]; then
-                    echo "WARNING: This command may modify your system or access sensitive data." >&2
-                    echo "Command: $command_local_retrieval" >&2
-                fi
-                echo -n "Proceed? (y/n): " >&2
-                read CONFIRMATION
-                if [ "$CONFIRMATION" != "y" ]; then
-                    echo "Aborted." >&2
-                    printf '\n%s\n%s\n' "$CONTENT_SEPARATOR" "$tokens_used_in_retrieval"
-                    return 1
-                fi
+            # Use the unified confirmation function
+            if ! confirm_and_execute_command "$command_local_retrieval" "false" ">&2" "1"; then
+                printf '\n%s\n%s|%s\n' "$CONTENT_SEPARATOR" "$retrieval_type" "$tokens_used_in_retrieval"
+                return 1
             fi
             
             echo "Output:" >&2
@@ -339,12 +329,12 @@ handle_retrieve() {
             
         *)
             echo "Error: LLM failed to classify retrieval type." >&2
-            printf '\n%s\n%s\n' "$CONTENT_SEPARATOR" "$tokens_used_in_retrieval"
+            printf '\n%s\n%s|%s\n' "$CONTENT_SEPARATOR" "FAILED_CLASSIFICATION" "$tokens_used_in_retrieval"
             return 1
             ;;
     esac
     
-    printf '%s\n%s\n%s\n' "$retrieved_content" "$CONTENT_SEPARATOR" "$tokens_used_in_retrieval"
+    printf '%s\n%s\n%s|%s\n' "$retrieved_content" "$CONTENT_SEPARATOR" "$retrieval_type" "$tokens_used_in_retrieval"
 }
 
 # Function to update context efficiently
@@ -399,6 +389,55 @@ validate_api_config() {
             fi
             ;;
     esac
+}
+
+# Function to handle command confirmation with safety checks
+confirm_and_execute_command() {
+    local command="$1"
+    local skip_confirmation="${2:-false}"
+    local stderr_redirect="${3:-}"
+    local return_on_abort="${4:-1}"
+    
+    # Enhanced security check for safe commands
+    local is_safe_cmd=false
+    if is_safe_command "$command"; then
+        is_safe_cmd=true
+    fi
+    
+    # Skip confirmation for /run commands, non-interactive mode, or safe commands
+    if [ "$skip_confirmation" = "true" ] || [ ! -t 0 ] || [ "$is_safe_cmd" = "true" ]; then
+        if [ "$is_safe_cmd" = "true" ]; then
+            echo "Auto-proceeding (safe command)" ${stderr_redirect:+>&2}
+        else
+            # For unsafe commands in non-interactive mode, show warning with countdown
+            if [ ! -t 0 ]; then
+                echo "WARNING: This command may modify your system or access sensitive data." ${stderr_redirect:+>&2}
+                echo "Command: $command" ${stderr_redirect:+>&2}
+                echo "Auto-proceeding in 10 seconds. Press Ctrl+C now to cancel" ${stderr_redirect:+>&2}
+                for i in {10..1}; do
+                    echo -n "$i..." ${stderr_redirect:+>&2}
+                    sleep 1
+                done
+                echo " proceeding" ${stderr_redirect:+>&2}
+            else
+                echo "Auto-proceeding" ${stderr_redirect:+>&2}
+            fi
+        fi
+    else
+        # For potentially unsafe commands, show more context
+        if [ "$SAFE_MODE_STRICT" = "true" ]; then
+            echo "WARNING: This command may modify your system or access sensitive data." ${stderr_redirect:+>&2}
+            echo "Command: $command" ${stderr_redirect:+>&2}
+        fi
+        echo -n "Proceed? (y/n): " ${stderr_redirect:+>&2}
+        read CONFIRMATION
+        if [ "$CONFIRMATION" != "y" ]; then
+            echo "Aborted." ${stderr_redirect:+>&2}
+            return $return_on_abort
+        fi
+    fi
+    
+    return 0
 }
 
 # Function to check if a command is safe (doesn't require confirmation)
@@ -589,16 +628,14 @@ analyze_command_failure() {
     local output="$2"
     local user_content_analysis analysis_response parsed_analysis analysis tokens_for_analysis
     
-    user_content_analysis="Previous interaction:${LAST_CONTEXT:+$'\n'}$LAST_CONTEXT${LAST_CONTEXT:+$'\n\n'}The command was: '$command'${command:+$'\n'}The output was: '$output'${output:+$'\n\n'}Analyze this output and explain the failure concisely."
+    user_content_analysis=$(build_context_with_previous "The command was: '$command'${command:+$'\n'}The output was: '$output'${output:+$'\n\n'}Analyze this output and explain the failure concisely." "$LAST_CONTEXT")
     
-    analysis_response=$(get_llm_response "$LLM_MODEL" \
+    local analysis_result
+    analysis_result=$(call_llm_and_update_tokens \
         "Respond in $LLM_LANGUAGE. You are a helpful assistant that analyzes the output of bash commands. Given the command and its output, provide a concise summary or explanation, especially if it failed. Consider the previous interaction if provided." \
         "$user_content_analysis")
     
-    parsed_analysis=$(parse_llm_response "$analysis_response")
-    analysis=$(echo "$parsed_analysis" | sed -n '1p')
-    tokens_for_analysis=$(echo "$parsed_analysis" | sed -n '2p')
-    TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + tokens_for_analysis))
+    analysis=$(echo "$analysis_result" | head -n -1)  # All content except last line (tokens)
     
     if [ -n "$analysis" ]; then
         echo "Analysis:"
@@ -627,17 +664,11 @@ handle_question_or_analysis() {
             ;;
     esac
     
-    user_content="$nl_instruction"
-    if [ -n "$LAST_CONTEXT" ]; then
-        user_content="Previous interaction:${LAST_CONTEXT:+$'\n'}$LAST_CONTEXT${LAST_CONTEXT:+$'\n\n'}New ${intent,,}: $nl_instruction"
-    fi
+    user_content=$(build_context_with_previous "$nl_instruction" "$LAST_CONTEXT" "New ${intent,,}")
     
-    local llm_response parsed_response answer tokens_for_answer
-    llm_response=$(get_llm_response "$LLM_MODEL" "$system_prompt" "$user_content")
-    parsed_response=$(parse_llm_response "$llm_response")
-    answer=$(echo "$parsed_response" | sed -n '1p')
-    tokens_for_answer=$(echo "$parsed_response" | sed -n '2p')
-    TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + tokens_for_answer))
+    local llm_result
+    llm_result=$(call_llm_and_update_tokens "$system_prompt" "$user_content")
+    answer=$(echo "$llm_result" | head -n -1)  # All content except last line (tokens)
     
     if [ -n "$answer" ]; then
         echo "$response_label:"
@@ -685,30 +716,28 @@ process_instruction() {
         nl_instruction="${BASH_REMATCH[1]}"
     else
         # Use LLM to classify intent
-        local intent_response parsed_intent_response
-        intent_response=$(get_llm_response "$LLM_MODEL" \
+        local intent_result
+        intent_result=$(call_llm_and_update_tokens \
             "You are an intent classifier for a shell assistant. Classify the user's input as:
 - 'COMMAND': Shell operations, system information requests that require executing commands to get current/live data (date, time, disk space, processes, file operations)
 - 'RETRIEVE': Requests to fetch information from local files or the internet (e.g., web search, file content retrieval)  
-- 'ANALYZE': Requests to analyze/examine/synthesize/evaluate/summarize data that is already available or will be retrieved. Keywords: 'analyze', 'examine', 'review', 'summarize', 'evaluate'
+- 'ANALYZE': Requests to analyze/examine/synthesize/evaluate/summarize/explain/review data that is already available or will be retrieved. Keywords: 'analyze', 'examine', 'review', 'summarize', 'evaluate', 'explain the output', 'interpret results'
 - 'QUESTION': General knowledge questions that can be answered without system access or command execution
 
 Examples:
 - 'what is the current date or time?' → COMMAND (needs 'date' command for current info)
 - 'list files' → COMMAND (needs 'ls' command)
 - 'analyze the current directory structure' → ANALYZE (analyzing/examining data)
+- 'explain the output of this command' → ANALYZE (explaining/interpreting command output)
 - 'what is Python?' → QUESTION (general knowledge)
 - 'search for news about AI' → RETRIEVE (needs web search)
 
 Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
             "$nl_instruction")
         
-        parsed_intent_response=$(parse_llm_response "$intent_response")
-        intent=$(echo "$parsed_intent_response" | sed -n '1p')
-        tokens_for_intent=$(echo "$parsed_intent_response" | sed -n '2p')
+        intent=$(echo "$intent_result" | head -n 1)  # First line only (should be single word)
     fi
     
-    TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + tokens_for_intent))
     echo "Mode: $intent"
     
     # Circuit breaker: Check if intent classification failed
@@ -736,21 +765,14 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
         "COMMAND")
             # Generate command if not already set
             if [ -z "$command" ]; then
-                local user_content_command command_response parsed_command_response tokens_for_command
+                user_content_command=$(build_context_with_previous "$nl_instruction" "$LAST_CONTEXT")
                 
-                user_content_command="$nl_instruction"
-                if [ -n "$LAST_CONTEXT" ]; then
-                    user_content_command="Previous interaction:${LAST_CONTEXT:+$'\n'}$LAST_CONTEXT${LAST_CONTEXT:+$'\n\n'}New instruction: $nl_instruction"
-                fi
-                
-                command_response=$(get_llm_response "$LLM_MODEL" \
+                local command_result
+                command_result=$(call_llm_and_update_tokens \
                     "Respond in $LLM_LANGUAGE. You are a helpful assistant that converts natural language to safe, single-line bash commands or several commands in the same line. Only reply with the commands with no markdown. Consider the previous interaction if provided." \
                     "$user_content_command")
                 
-                parsed_command_response=$(parse_llm_response "$command_response")
-                command=$(echo "$parsed_command_response" | sed -n '1p')
-                tokens_for_command=$(echo "$parsed_command_response" | sed -n '2p')
-                TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + tokens_for_command))
+                command=$(echo "$command_result" | head -n 1)  # First line only (should be single command)
                 
                 # Clean command of backticks
                 command="${command#\`}"
@@ -766,27 +788,89 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
             ;;
             
         "RETRIEVE")
+            # First, determine the specific retrieval type
+            local user_content_decision retrieval_result retrieval_type_used
+            user_content_decision=$(build_context_with_previous "$nl_instruction" "$LAST_CONTEXT")
+            
+            retrieval_result=$(call_llm_and_update_tokens \
+                "You are a helpful assistant that determines the best way to retrieve data for analysis. Given the user's request, decide if the information needs to be retrieved from from the local shell functions, binaries, filesystem or data ('LOCAL_RETRIEVAL'), or from the internet ('WEB_RETRIEVAL') if not available locally. Reply with only 'WEB_RETRIEVAL' or 'LOCAL_RETRIEVAL'. Consider the previous interaction if provided." \
+                "$user_content_decision")
+            
+            retrieval_type_used=$(echo "$retrieval_result" | head -n 1)  # First line only (should be single word)
+            retrieval_type_used="${retrieval_type_used//[[:space:]]/}"  # Remove whitespace/newlines
+            
+            # Update the displayed mode with the specific retrieval type immediately
+            echo "Mode: $retrieval_type_used"
+            
             echo "Retrieving data..."
+            
+            # Now perform the actual retrieval
             local llm_response_raw retrieved_content tokens_for_retrieval
             
-            llm_response_raw=$(handle_retrieve "$nl_instruction" "$LAST_CONTEXT")
+            # Now perform the actual retrieval
+            local llm_response_raw retrieved_content tokens_for_retrieval
             
-            # Parse the response by splitting on the separator
-            if [[ "$llm_response_raw" == *"$CONTENT_SEPARATOR"* ]]; then
-                retrieved_content="${llm_response_raw%$CONTENT_SEPARATOR*}"
-                tokens_for_retrieval="${llm_response_raw##*$CONTENT_SEPARATOR}"
-                tokens_for_retrieval="${tokens_for_retrieval//[[:space:]]/}"
-            else
-                retrieved_content="$llm_response_raw"
-                tokens_for_retrieval=0
-            fi
+            # Execute the appropriate retrieval method based on the determined type
+            case "$retrieval_type_used" in
+                "WEB_RETRIEVAL")
+                    if [ "$WEB_RETRIEVAL_ENGINE_FUNCTION" == "perplexica_search" ]; then
+                        retrieved_content=$("$WEB_RETRIEVAL_ENGINE_FUNCTION" "$nl_instruction" "webSearch" | jq -r '.message // empty')
+                    elif [ "$WEB_RETRIEVAL_ENGINE_FUNCTION" == "brave_search_function" ]; then
+                        retrieved_content=$("$WEB_RETRIEVAL_ENGINE_FUNCTION" "$nl_instruction" | jq -r '.message // empty')
+                    else
+                        echo "Error: Invalid WEB_RETRIEVAL_ENGINE_FUNCTION specified: $WEB_RETRIEVAL_ENGINE_FUNCTION" >&2
+                        retrieved_content=""
+                    fi
+                    ;;
+                    
+                "LOCAL_RETRIEVAL")
+                    local user_content_local_retrieval command_result command_local_retrieval
+                    
+                    user_content_local_retrieval=$(build_context_with_previous "$nl_instruction" "$LAST_CONTEXT" "New instruction (for local data retrieval)")
+                    
+                    command_result=$(call_llm_and_update_tokens \
+                        "Respond in $LLM_LANGUAGE. You are a helpful assistant that converts natural language requests for data retrieval into safe, single-line bash commands to retrieve that data from local files or system. Only reply with the command with no markdown. For example, if asked to 'read test.txt', you might reply 'cat test.txt'. Consider the previous interaction if provided." \
+                        "$user_content_local_retrieval")
+                    
+                    command_local_retrieval=$(echo "$command_result" | head -n 1)  # First line only (should be single command)
+                    
+                    # Clean command of backticks
+                    command_local_retrieval="${command_local_retrieval#\`}"
+                    command_local_retrieval="${command_local_retrieval%\`}"
+                    
+                    if [ -z "$command_local_retrieval" ]; then
+                        echo "Failed to generate local data retrieval command." >&2
+                        retrieved_content=""
+                    else
+                        echo "Running: $command_local_retrieval" >&2
+                        
+                        # Use the unified confirmation function
+                        if confirm_and_execute_command "$command_local_retrieval" "false" ">&2" "1"; then
+                            echo "Output:" >&2
+                            retrieved_content=$(eval "$command_local_retrieval" 2>&1)
+                            # Display the command output to the user
+                            printf "%s\n" "$retrieved_content" >&2
+                        else
+                            retrieved_content=""
+                        fi
+                    fi
+                    ;;
+                    
+                *)
+                    echo "Error: Unknown retrieval type: $retrieval_type_used" >&2
+                    retrieved_content=""
+                    ;;
+            esac
+            
+            # Since we're handling retrieval directly, we don't need to parse separators
+            tokens_for_retrieval=$(echo "$retrieval_result" | tail -n 1)  # Get tokens from the classification call
             
             if [ "$DEBUG_RAW_MESSAGES" = "true" ]; then
-                echo "DEBUG: Raw LLM_RESPONSE_RAW from handle_retrieve:" >&2
-                echo "LLM_RESPONSE_RAW $llm_response_raw" >&2
-                echo "DEBUG: Parsed RETRIEVED_CONTENT (in main loop):" >&2
+                echo "DEBUG: RETRIEVED_CONTENT (in main loop):" >&2
                 echo "RETRIEVED_CONTENT $retrieved_content" >&2
-                echo "DEBUG: Parsed TOKENS_FOR_RETRIEVAL (in main loop):" >&2
+                echo "DEBUG: RETRIEVAL_TYPE_USED (in main loop):" >&2
+                echo "RETRIEVAL_TYPE_USED $retrieval_type_used" >&2
+                echo "DEBUG: TOKENS_FOR_RETRIEVAL (in main loop):" >&2
                 echo "TOKENS_FOR_RETRIEVAL $tokens_for_retrieval" >&2
             fi
             
@@ -808,14 +892,13 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
                     echo "$user_content_analysis" >&2
                 fi
                 
-                analysis_response=$(get_llm_response "$LLM_MODEL" \
+                local analysis_result
+                analysis_result=$(call_llm_and_update_tokens \
                     "Respond in $LLM_LANGUAGE. You are a helpful assistant that analyzes retrieved data to provide useful summaries. Given the user's original request and the retrieved content, provide a clear, concise summary that addresses what the user was looking for. Extract the key information and present it in an organized, readable format." \
                     "$user_content_analysis")
                 
-                parsed_analysis_response=$(parse_llm_response "$analysis_response")
-                analysis_summary=$(echo "$parsed_analysis_response" | head -n -1)
-                tokens_for_analysis_summary=$(echo "$parsed_analysis_response" | tail -n 1)
-                TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + tokens_for_analysis_summary))
+                analysis_summary=$(echo "$analysis_result" | head -n -1)  # Get all lines except the last (tokens)
+                local analysis_tokens=$(echo "$analysis_result" | tail -n 1)
                 
                 if [ -n "$analysis_summary" ]; then
                     echo "Summary:"
@@ -833,14 +916,22 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
             # For ANALYZE mode, first check if we need to retrieve data
             echo "Analyzing data..."
             
-            # Check if the instruction mentions specific files or if we need to retrieve data first
+            # Check if the instruction refers to previous command output or recent context
             local needs_retrieval=false
-            if [[ "$nl_instruction" =~ \/[a-zA-Z0-9\/._-]+|[a-zA-Z0-9._-]+\.(txt|log|conf|cfg|json|xml|yaml|yml|csv|md|py|js|sh|cpp|c|h|java|sql|ini|properties|env) ]]; then
+            local refers_to_previous=false
+            
+            if [[ "$nl_instruction" =~ (this command|the output|previous command|last command|recent output|command output) ]]; then
+                refers_to_previous=true
+            elif [[ "$nl_instruction" =~ \/[a-zA-Z0-9\/._-]+|[a-zA-Z0-9._-]+\.(txt|log|conf|cfg|json|xml|yaml|yml|csv|md|py|js|sh|cpp|c|h|java|sql|ini|properties|env) ]]; then
                 needs_retrieval=true
             fi
             
             local analysis_data=""
-            if [ "$needs_retrieval" = "true" ]; then
+            if [ "$refers_to_previous" = "true" ] && [ -n "$LAST_CONTEXT" ]; then
+                # Use the existing context which should contain recent command output
+                analysis_data="$LAST_CONTEXT"
+                echo "Using previous command context for analysis..."
+            elif [ "$needs_retrieval" = "true" ]; then
                 echo "Retrieving data for analysis..."
                 local retrieval_response_raw retrieved_content tokens_for_retrieval
                 
@@ -862,22 +953,22 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
             
             # Now perform the analysis
             local system_prompt user_content
-            system_prompt="Respond in $LLM_LANGUAGE. You are a helpful assistant that analyzes provided data or context. Given the user's instruction and any provided data, provide a concise analysis or insights. Consider the previous interaction if provided."
+            if [ "$refers_to_previous" = "true" ]; then
+                system_prompt="Respond in $LLM_LANGUAGE. You are a helpful assistant that analyzes command outputs and explains their meaning. Given the user's request and the previous command/output context, provide a clear explanation of what the command did and what its output means. Focus on interpreting the results and explaining any important details."
+            else
+                system_prompt="Respond in $LLM_LANGUAGE. You are a helpful assistant that analyzes provided data or context. Given the user's instruction and any provided data, provide a concise analysis or insights. Consider the previous interaction if provided."
+            fi
             
-            user_content="$nl_instruction"
             if [ -n "$analysis_data" ]; then
                 user_content="Instruction: $nl_instruction${nl_instruction:+$'\n'}Data to analyze:${analysis_data:+$'\n'}$analysis_data"
+            else
+                user_content="$nl_instruction"
             fi
-            if [ -n "$LAST_CONTEXT" ]; then
-                user_content="Previous interaction:${LAST_CONTEXT:+$'\n'}$LAST_CONTEXT${LAST_CONTEXT:+$'\n\n'}$user_content"
-            fi
+            user_content=$(build_context_with_previous "$user_content" "$LAST_CONTEXT")
             
-            local llm_response parsed_response answer tokens_for_answer
-            llm_response=$(get_llm_response "$LLM_MODEL" "$system_prompt" "$user_content")
-            parsed_response=$(parse_llm_response "$llm_response")
-            answer=$(echo "$parsed_response" | sed -n '1p')
-            tokens_for_answer=$(echo "$parsed_response" | sed -n '2p')
-            TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + tokens_for_answer))
+            local analysis_result
+            analysis_result=$(call_llm_and_update_tokens "$system_prompt" "$user_content")
+            answer=$(echo "$analysis_result" | head -n -1)  # All content except last line (tokens)
             
             if [ -n "$answer" ]; then
                 echo "Analysis:"

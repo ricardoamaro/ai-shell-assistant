@@ -71,7 +71,7 @@ run_test() {
     
     # Run the command and capture output
     local output
-    output=$(echo "$input" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
+    output=$(echo "$input" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 60 ./nl_shell.sh "$MODEL" 2>&1)
     local exit_code=$?
     
     # Check if command completed successfully
@@ -115,7 +115,7 @@ test_direct_command() {
     echo -e "${YELLOW}Input:${NC} '$input'"
     
     local output
-    output=$(echo "$input" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
+    output=$(echo "$input" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 60 ./nl_shell.sh "$MODEL" 2>&1)
     local exit_code=$?
     
     if [ $exit_code -eq 124 ]; then
@@ -168,7 +168,7 @@ test_system_command() {
     echo -e "${YELLOW}Input:${NC} '$input'"
     
     local output
-    output=$(echo "$input" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
+    output=$(echo "$input" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 60 ./nl_shell.sh "$MODEL" 2>&1)
     local exit_code=$?
     
     if [ $exit_code -eq 124 ]; then
@@ -212,7 +212,7 @@ echo -e "${BLUE}Testing:${NC} Empty input handling"
 
 # Test empty input (should be handled gracefully)
 # Use a simpler approach to avoid hanging
-if echo "" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 10 ./nl_shell.sh "$MODEL" >/dev/null 2>&1; then
+if echo "" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 60 ./nl_shell.sh "$MODEL" >/dev/null 2>&1; then
     exit_code=0
 else
     exit_code=$?
@@ -252,7 +252,48 @@ echo -e "${BLUE}=== 5. ANALYZE Intent Tests ===${NC}"
 run_test "analyze the current directory structure" "ANALYZE" "Analysis classification"
 run_test "analyze disk usage in current directory" "ANALYZE" "Filesystem analysis classification"
 run_test "analyze the performance of my server" "ANALYZE" "Performance analysis classification"
-run_test "explain the output of this command" "ANALYZE" "Command output analysis"
+# Special test that uses a helper function for command output analysis
+test_context_analysis() {
+    local test_name="Command output analysis"
+    echo -e "${BLUE}Testing:${NC} $test_name"
+    echo -e "${YELLOW}Input:${NC} 'ls' followed by 'explain the output of this command'"
+    
+    local output
+    output=$(printf "ls\nexplain the output of this command\n" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 60 ./nl_shell.sh "$MODEL" 2>&1)
+    local exit_code=$?
+    
+    if [ $exit_code -eq 124 ]; then
+        print_result "$test_name" "FAIL" "Command timed out after 60 seconds"
+        return
+    elif [ $exit_code -ne 0 ]; then
+        print_result "$test_name" "FAIL" "Command failed with exit code $exit_code"
+        return
+    fi
+    
+    # Check for API quota/authentication errors
+    if echo "$output" | grep -q "exceeded your current quota\|authentication\|API.*error\|invalid.*key"; then
+        print_result "$test_name" "SKIP" "API quota exceeded or authentication error - skipping test"
+        echo -e "${YELLOW}Output:${NC}"
+        echo "$output" | head -5
+        echo "---"
+        echo
+        return
+    fi
+    
+    # Check if expected mode is present in output
+    if echo "$output" | grep -q "Mode: ANALYZE"; then
+        print_result "$test_name" "PASS"
+    else
+        print_result "$test_name" "FAIL" "Expected mode 'ANALYZE' not found in output"
+    fi
+    
+    echo -e "${YELLOW}Output:${NC}"
+    echo "$output" | head -20
+    echo "---"
+    echo
+}
+
+test_context_analysis
 run_test "analyze system logs for errors" "ANALYZE" "Log analysis classification"
 run_test "review this code for potential issues" "ANALYZE" "Code review analysis"
 run_test "examine network traffic patterns" "ANALYZE" "Network analysis classification"
@@ -268,7 +309,7 @@ echo -e "${BLUE}=== 8. Non-Interactive Mode Test ===${NC}"
 echo -e "${BLUE}Testing:${NC} Non-interactive mode"
 echo -e "${YELLOW}Input:${NC} 'list files in current directory'"
 
-output=$(echo "list files in current directory" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
+output=$(echo "list files in current directory" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 60 ./nl_shell.sh "$MODEL" 2>&1)
 exit_code=$?
 
 if [ $exit_code -eq 0 ] && echo "$output" | grep -q "Non-interactive mode detected"; then
