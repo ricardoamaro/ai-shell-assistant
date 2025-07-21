@@ -28,13 +28,14 @@ readonly MAX_FAILED_CLASSIFICATIONS=3
 readonly CONTENT_SEPARATOR="---END_CONTENT---"
 
 # Set defaults for variables that might not be in .env
-WEB_SEARCH_ENGINE_FUNCTION="${WEB_SEARCH_ENGINE_FUNCTION:-brave_search_function}"
+WEB_RETRIEVAL_ENGINE_FUNCTION="${WEB_RETRIEVAL_ENGINE_FUNCTION:-brave_search_function}"
 DEBUG_RAW_MESSAGES="${DEBUG_RAW_MESSAGES:-false}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o-mini}"
 GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.1}"
 LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.7}"
+LLM_LANGUAGE="${LLM_LANGUAGE:-English}"
 LOGS_DIR="${LOGS_DIR:-logs}"
 MAX_LAST_CONTEXT_WORDS="${MAX_LAST_CONTEXT_WORDS:-512}"
 TOTAL_TOKENS_USED="${TOTAL_TOKENS_USED:-0}"
@@ -70,6 +71,9 @@ escape_json() {
 parse_llm_response() {
     local response="$1"
     local content tokens
+    
+    # Remove <think> </think> blocks from the response (including multiline blocks)
+    response=$(echo "$response" | sed ':a;N;$!ba;s/<think>[^<]*<\/think>//g')
     
     # Check if response has multiple lines
     if [[ "$response" == *$'\n'* ]]; then
@@ -231,14 +235,14 @@ handle_retrieve() {
     local tokens_used_in_retrieval=0
     local user_content_decision retrieval_response retrieval_type
     
-    # Decide between WEB_SEARCH and LOCAL_SEARCH
+    # Decide between WEB_RETRIEVAL and LOCAL_RETRIEVAL
     user_content_decision="$nl_instruction"
     if [ -n "$last_context" ]; then
         user_content_decision="Previous interaction:${last_context:+$'\n'}$last_context${last_context:+$'\n\n'}New instruction: $nl_instruction"
     fi
     
     retrieval_response=$(get_llm_response "$LLM_MODEL" \
-        "You are a helpful assistant that determines the best way to retrieve data for analysis. Given the user's request, decide if the information needs to be retrieved from from the local shell functions, binaries, filesystem or data ('LOCAL_SEARCH'), or from the internet ('WEB_SEARCH') if not available locally. Reply with only 'WEB_SEARCH' or 'LOCAL_SEARCH'. Consider the previous interaction if provided." \
+        "You are a helpful assistant that determines the best way to retrieve data for analysis. Given the user's request, decide if the information needs to be retrieved from from the local shell functions, binaries, filesystem or data ('LOCAL_RETRIEVAL'), or from the internet ('WEB_RETRIEVAL') if not available locally. Reply with only 'WEB_RETRIEVAL' or 'LOCAL_RETRIEVAL'. Consider the previous interaction if provided." \
         "$user_content_decision")
     
     local parsed_response
@@ -247,19 +251,19 @@ handle_retrieve() {
     tokens_used_in_retrieval=$(echo "$parsed_response" | sed -n '2p')
     
     case "$retrieval_type" in
-        "WEB_SEARCH")
-            if [ "$WEB_SEARCH_ENGINE_FUNCTION" == "perplexica_search" ]; then
-                retrieved_content=$("$WEB_SEARCH_ENGINE_FUNCTION" "$nl_instruction" "webSearch" | jq -r '.message // empty')
-            elif [ "$WEB_SEARCH_ENGINE_FUNCTION" == "brave_search_function" ]; then
-                retrieved_content=$("$WEB_SEARCH_ENGINE_FUNCTION" "$nl_instruction" | jq -r '.message // empty')
+        "WEB_RETRIEVAL")
+            if [ "$WEB_RETRIEVAL_ENGINE_FUNCTION" == "perplexica_search" ]; then
+                retrieved_content=$("$WEB_RETRIEVAL_ENGINE_FUNCTION" "$nl_instruction" "webSearch" | jq -r '.message // empty')
+            elif [ "$WEB_RETRIEVAL_ENGINE_FUNCTION" == "brave_search_function" ]; then
+                retrieved_content=$("$WEB_RETRIEVAL_ENGINE_FUNCTION" "$nl_instruction" | jq -r '.message // empty')
             else
-                echo "Error: Invalid WEB_SEARCH_ENGINE_FUNCTION specified: $WEB_SEARCH_ENGINE_FUNCTION" >&2
+                echo "Error: Invalid WEB_RETRIEVAL_ENGINE_FUNCTION specified: $WEB_RETRIEVAL_ENGINE_FUNCTION" >&2
                 printf '\n%s\n%s\n' "$CONTENT_SEPARATOR" "$tokens_used_in_retrieval"
                 return 1
             fi
             ;;
             
-        "LOCAL_SEARCH")
+        "LOCAL_RETRIEVAL")
             local user_content_local_retrieval command_response command_local_retrieval command_tokens
             
             user_content_local_retrieval="$nl_instruction"
@@ -268,7 +272,7 @@ handle_retrieve() {
             fi
             
             command_response=$(get_llm_response "$LLM_MODEL" \
-                "You are a helpful assistant that converts natural language requests for data retrieval into safe, single-line bash commands to retrieve that data from local files or system. Only reply with the command with no markdown. For example, if asked to 'read test.txt', you might reply 'cat test.txt'. Consider the previous interaction if provided." \
+                "Respond in $LLM_LANGUAGE. You are a helpful assistant that converts natural language requests for data retrieval into safe, single-line bash commands to retrieve that data from local files or system. Only reply with the command with no markdown. For example, if asked to 'read test.txt', you might reply 'cat test.txt'. Consider the previous interaction if provided." \
                 "$user_content_local_retrieval")
             
             local parsed_command_response
@@ -287,8 +291,50 @@ handle_retrieve() {
                 return 1
             fi
             
+            # Execute the local retrieval command using the standard execution flow
+            # This will apply safety checks and proper confirmation handling
+            echo "Running: $command_local_retrieval" >&2
+            
+            # Enhanced security check for safe commands
+            local is_safe_cmd=false
+            if is_safe_command "$command_local_retrieval"; then
+                is_safe_cmd=true
+            fi
+            
+            # Skip confirmation for non-interactive mode, or safe commands
+            if [ ! -t 0 ] || [ "$is_safe_cmd" = "true" ]; then
+                if [ "$is_safe_cmd" = "true" ]; then
+                    echo "Auto-proceeding (safe command)" >&2
+                else
+                    # For unsafe commands in non-interactive mode, show warning with countdown
+                    echo "WARNING: This command may modify your system or access sensitive data." >&2
+                    echo "Command: $command_local_retrieval" >&2
+                    echo "Auto-proceeding in 10 seconds. Press Ctrl+C now to cancel" >&2
+                    for i in {10..1}; do
+                        echo -n "$i..." >&2
+                        sleep 1
+                    done
+                    echo " proceeding" >&2
+                fi
+            else
+                # For potentially unsafe commands, show more context
+                if [ "$SAFE_MODE_STRICT" = "true" ]; then
+                    echo "WARNING: This command may modify your system or access sensitive data." >&2
+                    echo "Command: $command_local_retrieval" >&2
+                fi
+                echo -n "Proceed? (y/n): " >&2
+                read CONFIRMATION
+                if [ "$CONFIRMATION" != "y" ]; then
+                    echo "Aborted." >&2
+                    printf '\n%s\n%s\n' "$CONTENT_SEPARATOR" "$tokens_used_in_retrieval"
+                    return 1
+                fi
+            fi
+            
+            echo "Output:" >&2
             retrieved_content=$(eval "$command_local_retrieval" 2>&1)
-            echo "$retrieved_content"
+            # Display the command output to the user
+            printf "%s\n" "$retrieved_content" >&2
             ;;
             
         *)
@@ -476,7 +522,19 @@ execute_command() {
         if [ "$is_safe_cmd" = "true" ]; then
             echo "Auto-proceeding (safe command)"
         else
-            echo "Auto-proceeding"
+            # For unsafe commands in non-interactive mode, show warning with countdown
+            if [ ! -t 0 ]; then
+                echo "WARNING: This command may modify your system or access sensitive data."
+                echo "Command: $command"
+                echo "Auto-proceeding in 10 seconds. Press Ctrl+C now to cancel"
+                for i in {10..1}; do
+                    echo -n "$i..."
+                    sleep 1
+                done
+                echo " proceeding"
+            else
+                echo "Auto-proceeding"
+            fi
         fi
     else
         # For potentially unsafe commands, show more context
@@ -534,7 +592,7 @@ analyze_command_failure() {
     user_content_analysis="Previous interaction:${LAST_CONTEXT:+$'\n'}$LAST_CONTEXT${LAST_CONTEXT:+$'\n\n'}The command was: '$command'${command:+$'\n'}The output was: '$output'${output:+$'\n\n'}Analyze this output and explain the failure concisely."
     
     analysis_response=$(get_llm_response "$LLM_MODEL" \
-        "You are a helpful assistant that analyzes the output of bash commands. Given the command and its output, provide a concise summary or explanation, especially if it failed. Consider the previous interaction if provided." \
+        "Respond in $LLM_LANGUAGE. You are a helpful assistant that analyzes the output of bash commands. Given the command and its output, provide a concise summary or explanation, especially if it failed. Consider the previous interaction if provided." \
         "$user_content_analysis")
     
     parsed_analysis=$(parse_llm_response "$analysis_response")
@@ -559,12 +617,12 @@ handle_question_or_analysis() {
     case "$intent" in
         "ANALYZE")
             echo "Analyzing data..."
-            system_prompt="You are a helpful assistant that analyzes provided data or context. Given the user's instruction and any previous context, provide a concise summary or insights. Assume the necessary data is already available in the context. Consider the previous interaction if provided."
+            system_prompt="Respond in $LLM_LANGUAGE. You are a helpful assistant that analyzes provided data or context. Given the user's instruction and any previous context, provide a concise summary or insights. Assume the necessary data is already available in the context. Consider the previous interaction if provided."
             response_label="Analysis"
             ;;
         "QUESTION")
             echo "Answering your question..."
-            system_prompt="You are a helpful shell assistant that can both run bash commands and answer general questions. Answer the user's question directly and concisely, keeping in mind your capabilities of running commands in the shell or just responding questions. Consider the previous interaction if provided."
+            system_prompt="Respond in $LLM_LANGUAGE. You are a helpful shell assistant that can both run bash commands and answer general questions. Answer the user's question directly and concisely, keeping in mind your capabilities of running commands in the shell or just responding questions. Consider the previous interaction if provided."
             response_label="Answer"
             ;;
     esac
@@ -686,7 +744,7 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
                 fi
                 
                 command_response=$(get_llm_response "$LLM_MODEL" \
-                    "You are a helpful assistant that converts natural language to safe, single-line bash commands or several commands in the same line. Only reply with the commands with no markdown. Consider the previous interaction if provided." \
+                    "Respond in $LLM_LANGUAGE. You are a helpful assistant that converts natural language to safe, single-line bash commands or several commands in the same line. Only reply with the commands with no markdown. Consider the previous interaction if provided." \
                     "$user_content_command")
                 
                 parsed_command_response=$(parse_llm_response "$command_response")
@@ -711,7 +769,7 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
             echo "Retrieving data..."
             local llm_response_raw retrieved_content tokens_for_retrieval
             
-            llm_response_raw=$(handle_retrieve "$nl_instruction" "$LAST_CONTEXT" 2>/dev/null)
+            llm_response_raw=$(handle_retrieve "$nl_instruction" "$LAST_CONTEXT")
             
             # Parse the response by splitting on the separator
             if [[ "$llm_response_raw" == *"$CONTENT_SEPARATOR"* ]]; then
@@ -751,7 +809,7 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
                 fi
                 
                 analysis_response=$(get_llm_response "$LLM_MODEL" \
-                    "You are a helpful assistant that analyzes retrieved data to provide useful summaries. Given the user's original request and the retrieved content, provide a clear, concise summary that addresses what the user was looking for. Extract the key information and present it in an organized, readable format." \
+                    "Respond in $LLM_LANGUAGE. You are a helpful assistant that analyzes retrieved data to provide useful summaries. Given the user's original request and the retrieved content, provide a clear, concise summary that addresses what the user was looking for. Extract the key information and present it in an organized, readable format." \
                     "$user_content_analysis")
                 
                 parsed_analysis_response=$(parse_llm_response "$analysis_response")
@@ -771,7 +829,68 @@ Reply with only 'COMMAND', 'RETRIEVE', 'ANALYZE', or 'QUESTION'." \
             fi
             ;;
             
-        "ANALYZE"|"QUESTION")
+        "ANALYZE")
+            # For ANALYZE mode, first check if we need to retrieve data
+            echo "Analyzing data..."
+            
+            # Check if the instruction mentions specific files or if we need to retrieve data first
+            local needs_retrieval=false
+            if [[ "$nl_instruction" =~ \/[a-zA-Z0-9\/._-]+|[a-zA-Z0-9._-]+\.(txt|log|conf|cfg|json|xml|yaml|yml|csv|md|py|js|sh|cpp|c|h|java|sql|ini|properties|env) ]]; then
+                needs_retrieval=true
+            fi
+            
+            local analysis_data=""
+            if [ "$needs_retrieval" = "true" ]; then
+                echo "Retrieving data for analysis..."
+                local retrieval_response_raw retrieved_content tokens_for_retrieval
+                
+                retrieval_response_raw=$(handle_retrieve "$nl_instruction" "$LAST_CONTEXT")
+                
+                # Parse the response by splitting on the separator
+                if [[ "$retrieval_response_raw" == *"$CONTENT_SEPARATOR"* ]]; then
+                    retrieved_content="${retrieval_response_raw%$CONTENT_SEPARATOR*}"
+                    tokens_for_retrieval="${retrieval_response_raw##*$CONTENT_SEPARATOR}"
+                    tokens_for_retrieval="${tokens_for_retrieval//[[:space:]]/}"
+                else
+                    retrieved_content="$retrieval_response_raw"
+                    tokens_for_retrieval=0
+                fi
+                
+                TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + tokens_for_retrieval))
+                analysis_data="$retrieved_content"
+            fi
+            
+            # Now perform the analysis
+            local system_prompt user_content
+            system_prompt="Respond in $LLM_LANGUAGE. You are a helpful assistant that analyzes provided data or context. Given the user's instruction and any provided data, provide a concise analysis or insights. Consider the previous interaction if provided."
+            
+            user_content="$nl_instruction"
+            if [ -n "$analysis_data" ]; then
+                user_content="Instruction: $nl_instruction${nl_instruction:+$'\n'}Data to analyze:${analysis_data:+$'\n'}$analysis_data"
+            fi
+            if [ -n "$LAST_CONTEXT" ]; then
+                user_content="Previous interaction:${LAST_CONTEXT:+$'\n'}$LAST_CONTEXT${LAST_CONTEXT:+$'\n\n'}$user_content"
+            fi
+            
+            local llm_response parsed_response answer tokens_for_answer
+            llm_response=$(get_llm_response "$LLM_MODEL" "$system_prompt" "$user_content")
+            parsed_response=$(parse_llm_response "$llm_response")
+            answer=$(echo "$parsed_response" | sed -n '1p')
+            tokens_for_answer=$(echo "$parsed_response" | sed -n '2p')
+            TOTAL_TOKENS_USED=$((TOTAL_TOKENS_USED + tokens_for_answer))
+            
+            if [ -n "$answer" ]; then
+                echo "Analysis:"
+                printf "%s\n" "$answer"
+            else
+                echo "Failed to get analysis from LLM."
+            fi
+            
+            # Update context
+            update_context "Analysis: '$nl_instruction'${nl_instruction:+$'\n'}Data: '$analysis_data'${analysis_data:+$'\n'}Result: '$answer'"
+            ;;
+            
+        "QUESTION")
             handle_question_or_analysis "$intent" "$nl_instruction"
             ;;
     esac

@@ -71,7 +71,7 @@ run_test() {
     
     # Run the command and capture output
     local output
-    output=$(echo "$input" | timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
+    output=$(echo "$input" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
     local exit_code=$?
     
     # Check if command completed successfully
@@ -115,7 +115,7 @@ test_direct_command() {
     echo -e "${YELLOW}Input:${NC} '$input'"
     
     local output
-    output=$(echo "$input" | timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
+    output=$(echo "$input" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
     local exit_code=$?
     
     if [ $exit_code -eq 124 ]; then
@@ -168,7 +168,7 @@ test_system_command() {
     echo -e "${YELLOW}Input:${NC} '$input'"
     
     local output
-    output=$(echo "$input" | timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
+    output=$(echo "$input" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
     local exit_code=$?
     
     if [ $exit_code -eq 124 ]; then
@@ -212,7 +212,7 @@ echo -e "${BLUE}Testing:${NC} Empty input handling"
 
 # Test empty input (should be handled gracefully)
 # Use a simpler approach to avoid hanging
-if echo "" | timeout 10 ./nl_shell.sh "$MODEL" >/dev/null 2>&1; then
+if echo "" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 10 ./nl_shell.sh "$MODEL" >/dev/null 2>&1; then
     exit_code=0
 else
     exit_code=$?
@@ -268,7 +268,7 @@ echo -e "${BLUE}=== 8. Non-Interactive Mode Test ===${NC}"
 echo -e "${BLUE}Testing:${NC} Non-interactive mode"
 echo -e "${YELLOW}Input:${NC} 'list files in current directory'"
 
-output=$(echo "list files in current directory" | timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
+output=$(echo "list files in current directory" | DEBUG_RAW_MESSAGES="$DEBUG_RAW_MESSAGES" OLLAMA_MODEL="$OLLAMA_MODEL" timeout 30 ./nl_shell.sh "$MODEL" 2>&1)
 exit_code=$?
 
 if [ $exit_code -eq 0 ] && echo "$output" | grep -q "Non-interactive mode detected"; then
